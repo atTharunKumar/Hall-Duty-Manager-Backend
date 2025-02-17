@@ -24,6 +24,10 @@ connection.connect((err) => {
 app.use(cors());
 app.use(bodyParser.json());
 
+
+
+let storedData = []; // Temporary storage for uploaded data
+
 // Staff Management Routes
 app.get('/api/staff', (req, res) => {
   connection.query('SELECT * FROM staff', (err, results) => {
@@ -37,27 +41,31 @@ app.get('/api/staff', (req, res) => {
 });
 
 app.post('/api/staff', (req, res) => {
-  const { name, type } = req.body;
-  connection.query('INSERT INTO staff (name, type) VALUES (?, ?)', [name, type], (err, results) => {
+  const { name, type, designation } = req.body;
+  connection.query('INSERT INTO staff (name, type, designation) VALUES (?, ?, ?)', [name, type, designation], (err, results) => {
     if (err) {
       console.error('Error adding new staff:', err);
       res.status(500).send('Internal Server Error');
       return;
     }
-    res.json({ id: results.insertId, name, type });
+    res.json({ id: results.insertId, name, type , designation});
   });
 });
 
+
+
 app.put('/api/staff/:id', (req, res) => {
   const { id } = req.params;
-  const { name, type } = req.body;
-  connection.query('UPDATE staff SET name = ?, type = ? WHERE id = ?', [name, type, id], (err) => {
+  const { name, type, designation} = req.body;
+  console.log(req.body)
+  const query = 'UPDATE staff SET name = ?, type = ?,  designation = ? WHERE id = ?';
+  connection.query(query, [name, type, designation, id], (err) => {
     if (err) {
       console.error('Error updating staff:', err);
       res.status(500).send('Internal Server Error');
       return;
     }
-    res.json({ id, name, type });
+    res.json({ id, name, type, designation});
   });
 });
 
@@ -197,3 +205,71 @@ app.get('/api/settings', (req, res) => {
 app.listen(port, () => {
   console.log(`Server running on http://localhost:${port}`);
 });
+
+// Endpoint to handle Excel data upload
+app.post('/api/upload-excel', (req, res) => {
+  const excelData = req.body;
+  if (!excelData || !Array.isArray(excelData)) {
+      return res.status(400).json({ error: 'Invalid data format' });
+  }
+
+  // Store the data
+  storedData = [...excelData];
+  console.log('Data received and stored:', storedData);
+const values = storedData.map(item => [
+  item.Date,
+  item.Session,
+  item['Course Code'], // Use square brackets for keys with spaces
+  item.Department,
+  item['Student Name'], // Use square brackets for keys with spaces
+  item['Register Number'] // Use square brackets for keys with spaces
+]);
+
+console.log(values);
+connection.query(
+  `INSERT INTO merged_table (date, session, course_code, department, student_name, register_number) VALUES ?`,
+  [values],
+  (err) => {
+    if (err) {
+      console.error('Error inserting data into merged_table:', err);
+      // Send response only if there was an error, and prevent further responses
+      if (!res.headersSent) {
+        res.status(500).send('Internal Server Error');
+      }
+      return;
+    }
+
+    // Send success response only once
+    if (!res.headersSent) {
+      res.json({ message: 'Data stored successfully in merged_table!' });
+    }
+  }
+);
+
+
+
+  // connection.query(
+  //   `INSERT INTO merged_table (date, session, course_code, department, student_name, register_number) VALUES ?`,
+  //   [values],
+  //   (err) => {
+  //     if (err) {
+  //       console.error('Error inserting data into merged_table:', err);
+  //       res.status(500).send('Internal Server Error');
+  //       return;
+  //     }
+  //     res.json({ message: 'Data stored successfully in merged_table!' });
+  //   }
+  // );
+  res.status(200).json({ message: 'Excel data uploaded and stored successfully' });
+});
+
+// Endpoint to retrieve stored data (optional)
+app.get('/api/retrieve-data', (req, res) => {
+  res.status(200).json(storedData);
+});
+
+// Endpoint to store data in the existing 'merged_table'
+
+
+
+
