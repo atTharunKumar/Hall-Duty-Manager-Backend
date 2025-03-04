@@ -2,6 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const mysql = require('mysql2');
+const multer = require('multer');
+const XLSX = require('xlsx');
 const app = express();
 const port = 5000;
 
@@ -22,13 +24,15 @@ connection.connect((err) => {
 
 // Middleware
 app.use(cors());
-app.use(bodyParser.json());
+// Increase payload limit to 50mb for JSON and URL-encoded data
+app.use(bodyParser.json({ limit: '50mb' }));
+app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 
+// Multer setup for handling file uploads (memory storage)
+const storage = multer.memoryStorage();
+const upload = multer({ storage });
 
-
-let storedData = []; // Temporary storage for uploaded data
-
-// Staff Management Routes
+// ---------- Staff Management Routes ----------
 app.get('/api/staff', (req, res) => {
   connection.query('SELECT * FROM staff', (err, results) => {
     if (err) {
@@ -48,28 +52,25 @@ app.post('/api/staff', (req, res) => {
       res.status(500).send('Internal Server Error');
       return;
     }
-    res.json({ id: results.insertId, name, type , designation});
+    res.json({ id: results.insertId, name, type, designation });
   });
 });
 
-
-
 app.put('/api/staff/:id', (req, res) => {
   const { id } = req.params;
-  const { name, type, designation} = req.body;
-  console.log(req.body)
-  const query = 'UPDATE staff SET name = ?, type = ?,  designation = ? WHERE id = ?';
+  const { name, type, designation } = req.body;
+  const query = 'UPDATE staff SET name = ?, type = ?, designation = ? WHERE id = ?';
   connection.query(query, [name, type, designation, id], (err) => {
     if (err) {
       console.error('Error updating staff:', err);
       res.status(500).send('Internal Server Error');
       return;
     }
-    res.json({ id, name, type, designation});
+    res.json({ id, name, type, designation });
   });
 });
 
-// Hall Management Routes
+// ---------- Hall Management Routes ----------
 app.get('/api/halls', (req, res) => {
   connection.query('SELECT * FROM halls', (err, results) => {
     if (err) {
@@ -83,22 +84,21 @@ app.get('/api/halls', (req, res) => {
 
 app.post('/api/halls', (req, res) => {
   const { name, capacity, ROW_S, COL_s } = req.body;
-  console.log(req.body)
   connection.query('INSERT INTO halls (name, capacity) VALUES (?, ?)', [name, capacity], (err, results) => {
     if (err) {
       console.error('Error adding new hall:', err);
       res.status(500).send('Internal Server Error');
       return;
     }
-    
-  });
-  connection.query('UPDATE halls SET ROW_S = ?, COL_s = ? WHERE name = ?', [ ROW_S, COL_s, name], (err) => {
-    if (err) {
-     console.err(err)
-   
-    }
-   
-    res.send({message:"ji"})
+    // Update additional fields after insertion
+    connection.query('UPDATE halls SET ROW_S = ?, COL_s = ? WHERE name = ?', [ROW_S, COL_s, name], (err) => {
+      if (err) {
+        console.error('Error updating hall additional fields:', err);
+        res.status(500).send('Internal Server Error');
+        return;
+      }
+      res.send({ message: "Hall added successfully" });
+    });
   });
 });
 
@@ -107,16 +107,74 @@ app.put('/api/halls/:id', (req, res) => {
   const { name, capacity, ROW_S, COL_s } = req.body;
   connection.query('UPDATE halls SET name = ?, capacity = ?, ROW_S = ?, COL_s = ? WHERE id = ?', [name, capacity, ROW_S, COL_s, id], (err) => {
     if (err) {
-     console.err(err)
-   
+      console.error('Error updating hall:', err);
+      res.status(500).send('Internal Server Error');
+      return;
     }
-   
     res.json({ id, name, capacity, ROW_S, COL_s });
   });
 });
 
+// New endpoint to handle XLSX/CSV uploads and replace halls data
+app.post('/api/halls/upload', upload.single('file'), (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file provided' });
+  }
+  try {
+    // Parse the file from the file buffer
+    const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+    const sheetName = workbook.SheetNames[0]; // Use the first sheet
+    const worksheet = workbook.Sheets[sheetName];
+    // Convert the worksheet to JSON; each row becomes an object
+    const hallsData = XLSX.utils.sheet_to_json(worksheet);
+    
+    // Begin transaction to replace hall data
+    connection.beginTransaction(err => {
+      if (err) {
+        console.error('Transaction error:', err);
+        return res.status(500).send('Internal Server Error');
+      }
+      // Delete existing hall records
+      connection.query('DELETE FROM halls', (err) => {
+        if (err) {
+          console.error('Error deleting existing halls:', err);
+          return connection.rollback(() => res.status(500).send('Internal Server Error'));
+        }
+        // Map each hall record to an array for bulk insert.
+        // Assuming each hall has: name, ROW_S, COL_s. Calculate capacity = ROW_S * COL_s.
+        const values = hallsData.map(item => {
+          const rows = parseInt(item.ROW_S, 10);
+          const columns = parseInt(item.COL_s, 10);
+          const capacity = rows * columns;
+          return [item.name, capacity, rows, columns];
+        });
+        // Insert new hall records. Adjust the query as per your table schema.
+        connection.query(
+          `INSERT INTO halls (name, capacity, ROW_S, COL_s) VALUES ?`,
+          [values],
+          (err) => {
+            if (err) {
+              console.error('Error inserting new hall data:', err);
+              return connection.rollback(() => res.status(500).send('Internal Server Error'));
+            }
+            connection.commit(err => {
+              if (err) {
+                console.error('Commit error:', err);
+                return connection.rollback(() => res.status(500).send('Internal Server Error'));
+              }
+              res.json({ message: 'Hall data replaced successfully from XLSX file!' });
+            });
+          }
+        );
+      });
+    });
+  } catch (error) {
+    console.error('Error processing file:', error);
+    res.status(500).json({ error: 'Failed to process file' });
+  }
+});
 
-// Session Strength Management Routes
+// ---------- Session Strength Management Routes ----------
 app.get('/api/session-strengths', (req, res) => {
   connection.query('SELECT * FROM session_strengths ORDER BY day', (err, results) => {
     if (err) {
@@ -130,47 +188,31 @@ app.get('/api/session-strengths', (req, res) => {
 
 app.post('/api/session-strengths', (req, res) => {
   const { sessionStrengths } = req.body;
-
-  // Begin transaction
   connection.beginTransaction((err) => {
     if (err) {
       console.error('Error starting transaction:', err);
-      res.status(500).send('Internal Server Error');
-      return;
+      return res.status(500).send('Internal Server Error');
     }
-
-    // Delete existing session strengths
     connection.query('DELETE FROM session_strengths', (err) => {
       if (err) {
         console.error('Error deleting existing session strengths:', err);
-        return connection.rollback(() => {
-          res.status(500).send('Internal Server Error');
-        });
+        return connection.rollback(() => res.status(500).send('Internal Server Error'));
       }
-
-      // Insert new session strengths
       const values = sessionStrengths.map(({ day, exam1, exam2 }) => [
         day, exam1.name, exam1.strength, exam2.name, exam2.strength
       ]);
-
       connection.query(
         'INSERT INTO session_strengths (day, exam1_name, exam1_strength, exam2_name, exam2_strength) VALUES ?',
         [values],
         (err) => {
           if (err) {
             console.error('Error inserting new session strengths:', err);
-            return connection.rollback(() => {
-              res.status(500).send('Internal Server Error');
-            });
+            return connection.rollback(() => res.status(500).send('Internal Server Error'));
           }
-
-          // Commit transaction
           connection.commit((err) => {
             if (err) {
               console.error('Error committing transaction:', err);
-              return connection.rollback(() => {
-                res.status(500).send('Internal Server Error');
-              });
+              return connection.rollback(() => res.status(500).send('Internal Server Error'));
             }
             res.json({ message: 'Session strengths updated successfully!' });
           });
@@ -180,7 +222,7 @@ app.post('/api/session-strengths', (req, res) => {
   });
 });
 
-// Fetch Students Route
+// ---------- Students Management Routes ----------
 app.get('/api/students', (req, res) => {
   connection.query('SELECT * FROM students', (err, results) => {
     if (err) {
@@ -192,7 +234,104 @@ app.get('/api/students', (req, res) => {
   });
 });
 
-// Handle other routes
+app.post('/api/students/upload', (req, res) => {
+  const studentsData = req.body;
+  if (!studentsData || !Array.isArray(studentsData)) {
+    return res.status(400).json({ error: 'Invalid data format' });
+  }
+  connection.beginTransaction(err => {
+    if (err) {
+      console.error('Transaction error:', err);
+      return res.status(500).send('Internal Server Error');
+    }
+    connection.query('DELETE FROM students', (err) => {
+      if (err) {
+        console.error('Error deleting existing student data:', err);
+        return connection.rollback(() => res.status(500).send('Internal Server Error'));
+      }
+      const values = studentsData.map(item => [
+        item.registration_number,
+        item.name,
+        item.department,
+        item.subject_code,
+        item.date,
+        item.session
+      ]);
+      connection.query(
+        `INSERT INTO students (registration_number, name, department, subject_code, date, session) VALUES ?`,
+        [values],
+        (err) => {
+          if (err) {
+            console.error('Error inserting new student data:', err);
+            return connection.rollback(() => res.status(500).send('Internal Server Error'));
+          }
+          connection.commit(err => {
+            if (err) {
+              console.error('Commit error:', err);
+              return connection.rollback(() => res.status(500).send('Internal Server Error'));
+            }
+            res.json({ message: 'Student data replaced successfully!' });
+          });
+        }
+      );
+    });
+  });
+});
+
+app.post('/api/students/upload-xlsx', upload.single('file'), (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file provided' });
+  }
+  try {
+    const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+    const sheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[sheetName];
+    const studentsData = XLSX.utils.sheet_to_json(worksheet);
+    
+    connection.beginTransaction(err => {
+      if (err) {
+        console.error('Transaction error:', err);
+        return res.status(500).send('Internal Server Error');
+      }
+      connection.query('DELETE FROM students', (err) => {
+        if (err) {
+          console.error('Error deleting existing student data:', err);
+          return connection.rollback(() => res.status(500).send('Internal Server Error'));
+        }
+        const values = studentsData.map(item => [
+          item.registration_number,
+          item.name,
+          item.department,
+          item.subject_code,
+          item.date,
+          item.session
+        ]);
+        connection.query(
+          `INSERT INTO students (registration_number, name, department, subject_code, date, session) VALUES ?`,
+          [values],
+          (err) => {
+            if (err) {
+              console.error('Error inserting new student data:', err);
+              return connection.rollback(() => res.status(500).send('Internal Server Error'));
+            }
+            connection.commit(err => {
+              if (err) {
+                console.error('Commit error:', err);
+                return connection.rollback(() => res.status(500).send('Internal Server Error'));
+              }
+              res.json({ message: 'Student data replaced successfully from XLSX file!' });
+            });
+          }
+        );
+      });
+    });
+  } catch (error) {
+    console.error('Error processing XLSX file:', error);
+    res.status(500).json({ error: 'Failed to process file' });
+  }
+});
+
+// ---------- Other Routes ----------
 app.get('/api/reports', (req, res) => {
   res.json({ message: 'Reports feature is under development.' });
 });
@@ -205,71 +344,3 @@ app.get('/api/settings', (req, res) => {
 app.listen(port, () => {
   console.log(`Server running on http://localhost:${port}`);
 });
-
-// Endpoint to handle Excel data upload
-app.post('/api/upload-excel', (req, res) => {
-  const excelData = req.body;
-  if (!excelData || !Array.isArray(excelData)) {
-      return res.status(400).json({ error: 'Invalid data format' });
-  }
-
-  // Store the data
-  storedData = [...excelData];
-  console.log('Data received and stored:', storedData);
-const values = storedData.map(item => [
-  item.Date,
-  item.Session,
-  item['Course Code'], // Use square brackets for keys with spaces
-  item.Department,
-  item['Student Name'], // Use square brackets for keys with spaces
-  item['Register Number'] // Use square brackets for keys with spaces
-]);
-
-console.log(values);
-connection.query(
-  `INSERT INTO merged_table (date, session, course_code, department, student_name, register_number) VALUES ?`,
-  [values],
-  (err) => {
-    if (err) {
-      console.error('Error inserting data into merged_table:', err);
-      // Send response only if there was an error, and prevent further responses
-      if (!res.headersSent) {
-        res.status(500).send('Internal Server Error');
-      }
-      return;
-    }
-
-    // Send success response only once
-    if (!res.headersSent) {
-      res.json({ message: 'Data stored successfully in merged_table!' });
-    }
-  }
-);
-
-
-
-  // connection.query(
-  //   `INSERT INTO merged_table (date, session, course_code, department, student_name, register_number) VALUES ?`,
-  //   [values],
-  //   (err) => {
-  //     if (err) {
-  //       console.error('Error inserting data into merged_table:', err);
-  //       res.status(500).send('Internal Server Error');
-  //       return;
-  //     }
-  //     res.json({ message: 'Data stored successfully in merged_table!' });
-  //   }
-  // );
-  res.status(200).json({ message: 'Excel data uploaded and stored successfully' });
-});
-
-// Endpoint to retrieve stored data (optional)
-app.get('/api/retrieve-data', (req, res) => {
-  res.status(200).json(storedData);
-});
-
-// Endpoint to store data in the existing 'merged_table'
-
-
-
-
