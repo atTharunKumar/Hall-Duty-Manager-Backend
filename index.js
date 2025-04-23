@@ -4,6 +4,9 @@ const bodyParser = require('body-parser');
 const mysql = require('mysql2');
 const multer = require('multer');
 const XLSX = require('xlsx');
+const session = require('express-session');
+// const { OAuth2Client } = require('google-auth-library');
+
 const app = express();
 const port = 5000;
 
@@ -22,17 +25,90 @@ connection.connect((err) => {
   console.log('Connected to MySQL');
 });
 
+// app.use((req, res, next) => {
+//   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+//   next();
+// });
+
+
+// Google OAuth client setup (use your actual client ID)
+// const CLIENT_ID = '361374319106-batvm6m2ctt8mbse8cjf71lsgdusl06f.apps.googleusercontent.com';
+// const googleClient = new OAuth2Client(CLIENT_ID);
+
 // Middleware
-app.use(cors());
-// Increase payload limit to 50mb for JSON and URL-encoded data
+app.use(cors({
+  origin: 'http://localhost:3000', // Adjust to your front-end URL
+  credentials: true,
+}));
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 
-// Multer setup for handling file uploads (memory storage)
+// Session middleware
+app.use(session({
+  secret: 'your-secret-key', // Replace with a strong secret
+  resave: false,
+  saveUninitialized: false,
+}));
+
+// Multer setup for file uploads (memory storage)
 const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
-// ---------- Staff Management Routes ----------
+// /* ---------- Google OAuth Endpoints ---------- */
+
+// // POST /auth/google
+// app.post('/auth/google', async (req, res) => {
+//   const { token } = req.body;
+//   if (!token) {
+//     return res.status(400).json({ error: 'Token is required' });
+//   }
+//   try {
+//     // Verify token using Google OAuth2 client
+//     const ticket = await googleClient.verifyIdToken({
+//       idToken: token,
+//       audience: CLIENT_ID,
+//     });
+//     const payload = ticket.getPayload();
+//     const { email, name, picture } = payload;
+
+//     // Determine user role (example: if email includes "admin" then role is admin)
+//     let role = 'faculty'; // default role
+//     if (email.includes('admin')) {
+//       role = 'admin';
+//     }
+//     // Alternatively, you can query your database to determine the role
+
+//     // Save user details in session
+//     req.session.user = { email, name, picture, role };
+
+//     res.json({ user: req.session.user, role });
+//   } catch (error) {
+//     console.error("Error verifying Google token:", error);
+//     res.status(401).json({ error: 'Invalid token' });
+//   }
+// });
+
+// // GET /auth/user - returns current logged-in user
+// app.get('/auth/user', (req, res) => {
+//   if (req.session.user) {
+//     res.json(req.session.user);
+//   } else {
+//     res.status(401).json({ error: 'Not authenticated' });
+//   }
+// });
+
+// // GET /auth/logout - logs out the user
+// app.get('/auth/logout', (req, res) => {
+//   req.session.destroy((err) => {
+//     if (err) {
+//       console.error('Logout error:', err);
+//       return res.status(500).json({ error: 'Logout failed' });
+//     }
+//     res.json({ message: 'Logged out successfully' });
+//   });
+// });
+
+/* ---------- Staff Management Routes ---------- */
 app.get('/api/staff', (req, res) => {
   connection.query('SELECT * FROM staff', (err, results) => {
     if (err) {
@@ -70,7 +146,7 @@ app.put('/api/staff/:id', (req, res) => {
   });
 });
 
-// ---------- Hall Management Routes ----------
+/* ---------- Hall Management Routes ---------- */
 app.get('/api/halls', (req, res) => {
   connection.query('SELECT * FROM halls', (err, results) => {
     if (err) {
@@ -115,40 +191,33 @@ app.put('/api/halls/:id', (req, res) => {
   });
 });
 
-// New endpoint to handle XLSX/CSV uploads and replace halls data
+// Endpoint for XLSX/CSV uploads to replace halls data
 app.post('/api/halls/upload', upload.single('file'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file provided' });
   }
   try {
-    // Parse the file from the file buffer
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
-    const sheetName = workbook.SheetNames[0]; // Use the first sheet
+    const sheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[sheetName];
-    // Convert the worksheet to JSON; each row becomes an object
     const hallsData = XLSX.utils.sheet_to_json(worksheet);
     
-    // Begin transaction to replace hall data
     connection.beginTransaction(err => {
       if (err) {
         console.error('Transaction error:', err);
         return res.status(500).send('Internal Server Error');
       }
-      // Delete existing hall records
       connection.query('DELETE FROM halls', (err) => {
         if (err) {
           console.error('Error deleting existing halls:', err);
           return connection.rollback(() => res.status(500).send('Internal Server Error'));
         }
-        // Map each hall record to an array for bulk insert.
-        // Assuming each hall has: name, ROW_S, COL_s. Calculate capacity = ROW_S * COL_s.
         const values = hallsData.map(item => {
           const rows = parseInt(item.ROW_S, 10);
           const columns = parseInt(item.COL_s, 10);
           const capacity = rows * columns;
           return [item.name, capacity, rows, columns];
         });
-        // Insert new hall records. Adjust the query as per your table schema.
         connection.query(
           `INSERT INTO halls (name, capacity, ROW_S, COL_s) VALUES ?`,
           [values],
@@ -174,7 +243,141 @@ app.post('/api/halls/upload', upload.single('file'), (req, res) => {
   }
 });
 
-// ---------- Session Strength Management Routes ----------
+/* ---------- Slot Management Routes ---------- */
+
+app.get('/api/slots', (req, res) => {
+  connection.query('SELECT * FROM slots ORDER BY date_from', (err, results) => {
+    if (err) {
+      console.error('Error fetching slots:', err);
+      return res.status(500).send('Internal Server Error');
+    }
+    res.json(results);
+  });
+});
+
+app.post('/api/slots', (req, res) => {
+  const { courseDetails, date_from, start_time, end_time, venue, total_slots } = req.body;
+  if (!courseDetails || !date_from || !start_time || !end_time || !venue || !total_slots) {
+    return res.status(400).send('Missing required fields');
+  }
+  const query = 'INSERT INTO slots (courseDetails, date_from, start_time, end_time, venue, total_slots, available_slots) VALUES (?, ?, ?, ?, ?, ?, ?)';
+  const values = [courseDetails, date_from, start_time, end_time, venue, Number(total_slots), Number(total_slots)];
+  connection.query(query, values, (err, results) => {
+    if (err) {
+      console.error('Error inserting slot:', err);
+      return res.status(500).send('Internal Server Error');
+    }
+    res.json({
+      id: results.insertId,
+      courseDetails,
+      date_from,
+      start_time,
+      end_time,
+      venue,
+      total_slots: Number(total_slots),
+      available_slots: Number(total_slots)
+    });
+  });
+});
+
+/* ---------- Booking Routes ---------- */
+
+app.post('/api/bookings', (req, res) => {
+  const { slotId, user } = req.body;
+  if (!slotId || !user || !user.name || !user.email) {
+    return res.status(400).json({ error: "Missing required fields" });
+  }
+  connection.query('SELECT * FROM slots WHERE id = ?', [slotId], (err, results) => {
+    if (err) {
+      console.error('Error fetching slot:', err);
+      return res.status(500).json({ error: 'Internal Server Error' });
+    }
+    if (results.length === 0) {
+      return res.status(404).json({ error: "Slot not found" });
+    }
+    const slot = results[0];
+    if (slot.available_slots <= 0) {
+      return res.status(400).json({ error: "No available slots" });
+    }
+    connection.beginTransaction(err => {
+      if (err) {
+        console.error("Transaction error:", err);
+        return res.status(500).json({ error: "Internal Server Error" });
+      }
+      connection.query('UPDATE slots SET available_slots = available_slots - 1 WHERE id = ?', [slotId], (err) => {
+        if (err) {
+          console.error("Error updating slot:", err);
+          return connection.rollback(() => res.status(500).json({ error: "Internal Server Error" }));
+        }
+        const bookedAt = new Date();
+        connection.query(
+          'INSERT INTO bookings (slotId, userName, userEmail, bookedAt) VALUES (?, ?, ?, ?)',
+          [slotId, user.name, user.email, bookedAt],
+          (err, insertResults) => {
+            if (err) {
+              console.error("Error inserting booking:", err);
+              return connection.rollback(() => res.status(500).json({ error: "Internal Server Error" }));
+            }
+            connection.commit(err => {
+              if (err) {
+                console.error("Commit error:", err);
+                return connection.rollback(() => res.status(500).json({ error: "Internal Server Error" }));
+              }
+              res.json({
+                bookingId: insertResults.insertId,
+                slotId,
+                user,
+                bookedAt,
+                updatedSlot: { ...slot, available_slots: slot.available_slots - 1 }
+              });
+            });
+          }
+        );
+      });
+    });
+  });
+});
+
+app.get('/api/bookings', (req, res) => {
+  const query = `
+    SELECT 
+      b.id,
+      b.userName,
+      b.userEmail,
+      b.bookedAt,
+      s.id AS slotId,
+      s.courseDetails,
+      s.date_from,
+      s.start_time,
+      s.end_time,
+      s.venue
+    FROM bookings b
+    JOIN slots s ON b.slotId = s.id
+    ORDER BY b.bookedAt DESC
+  `;
+  connection.query(query, (err, results) => {
+    if (err) {
+      console.error("Error fetching bookings:", err);
+      return res.status(500).json({ error: "Internal Server Error" });
+    }
+    const bookings = results.map(row => ({
+      id: row.id,
+      user: { name: row.userName, email: row.userEmail },
+      slot: {
+        id: row.slotId,
+        courseDetails: row.courseDetails,
+        date_from: row.date_from,
+        start_time: row.start_time,
+        end_time: row.end_time,
+        venue: row.venue
+      },
+      bookedAt: row.bookedAt
+    }));
+    res.json(bookings);
+  });
+});
+
+/* ---------- Session Strength Management Routes ---------- */
 app.get('/api/session-strengths', (req, res) => {
   connection.query('SELECT * FROM session_strengths ORDER BY day', (err, results) => {
     if (err) {
@@ -222,7 +425,7 @@ app.post('/api/session-strengths', (req, res) => {
   });
 });
 
-// ---------- Students Management Routes ----------
+/* ---------- Students Management Routes ---------- */
 app.get('/api/students', (req, res) => {
   connection.query('SELECT * FROM students', (err, results) => {
     if (err) {
@@ -331,7 +534,7 @@ app.post('/api/students/upload-xlsx', upload.single('file'), (req, res) => {
   }
 });
 
-// ---------- Other Routes ----------
+/* ---------- Other Routes ---------- */
 app.get('/api/reports', (req, res) => {
   res.json({ message: 'Reports feature is under development.' });
 });
